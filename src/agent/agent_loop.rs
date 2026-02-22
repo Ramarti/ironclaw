@@ -72,6 +72,8 @@ pub struct AgentDeps {
     pub hooks: Arc<HookRegistry>,
     /// Cost enforcement guardrails (daily budget, hourly rate limits).
     pub cost_guard: Arc<crate::agent::cost_guard::CostGuard>,
+    /// Persona registry for role-based access control.
+    pub persona_registry: Option<Arc<std::sync::RwLock<crate::personas::PersonaRegistry>>>,
 }
 
 /// The main agent that coordinates all components.
@@ -172,6 +174,12 @@ impl Agent {
 
     pub(super) fn skill_registry(&self) -> Option<&Arc<std::sync::RwLock<SkillRegistry>>> {
         self.deps.skill_registry.as_ref()
+    }
+
+    pub(super) fn persona_registry(
+        &self,
+    ) -> Option<&Arc<std::sync::RwLock<crate::personas::PersonaRegistry>>> {
+        self.deps.persona_registry.as_ref()
     }
 
     /// Select active skills for a message using deterministic prefiltering.
@@ -652,6 +660,7 @@ impl Agent {
             Submission::Heartbeat => self.process_heartbeat().await,
             Submission::Summarize => self.process_summarize(session, thread_id).await,
             Submission::Suggest => self.process_suggest(session, thread_id).await,
+            Submission::Persona { args } => self.handle_persona_command(&args, session).await,
             Submission::Quit => return Ok(None),
             Submission::SwitchThread { thread_id: target } => {
                 self.process_switch_thread(message, target).await

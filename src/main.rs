@@ -1423,6 +1423,34 @@ async fn main() -> anyhow::Result<()> {
     let boot_llm_model = llm.model_name().to_string();
     let boot_cheap_model = cheap_llm.as_ref().map(|c| c.model_name().to_string());
 
+    // Initialize persona registry
+    let persona_registry = {
+        let user_dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".ironclaw")
+            .join("personas");
+        let mut registry = ironclaw::personas::PersonaRegistry::new(user_dir);
+
+        // Add workspace personas directory if workspace is available
+        if let Ok(cwd) = std::env::current_dir() {
+            let ws_personas = cwd.join("personas");
+            if ws_personas.exists() {
+                registry = registry.with_workspace_dir(ws_personas);
+            }
+        }
+
+        let discovered = registry.discover_all().await;
+        if !discovered.is_empty() {
+            tracing::info!(
+                "Loaded {} persona(s): {}",
+                discovered.len(),
+                discovered.join(", ")
+            );
+        }
+
+        Some(Arc::new(std::sync::RwLock::new(registry)))
+    };
+
     // Create and run the agent
     let deps = AgentDeps {
         store: db,
@@ -1436,6 +1464,7 @@ async fn main() -> anyhow::Result<()> {
         skills_config: config.skills.clone(),
         hooks,
         cost_guard,
+        persona_registry,
     };
     let agent = Agent::new(
         config.agent.clone(),

@@ -240,6 +240,8 @@ impl Store {
                     total_tokens_used: 0,
                     max_tokens: 0,
                     extra_env: std::sync::Arc::new(std::collections::HashMap::new()),
+                    persona_shell_patterns: None,
+                    persona_sandbox_policy: None,
                 }))
             }
             None => Ok(None),

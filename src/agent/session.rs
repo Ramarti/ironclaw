@@ -102,6 +102,35 @@ impl Session {
         }
     }
 
+    /// Set the active persona for this session.
+    pub fn set_persona(&mut self, name: &str) {
+        if !self.metadata.is_object() {
+            self.metadata = serde_json::json!({});
+        }
+        self.metadata
+            .as_object_mut()
+            .expect("ensured object above")
+            .insert(
+                "persona".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+    }
+
+    /// Get the active persona name, if any.
+    pub fn persona(&self) -> Option<&str> {
+        self.metadata
+            .as_object()
+            .and_then(|m| m.get("persona"))
+            .and_then(|v| v.as_str())
+    }
+
+    /// Clear the active persona.
+    pub fn clear_persona(&mut self) {
+        if let Some(obj) = self.metadata.as_object_mut() {
+            obj.remove("persona");
+        }
+    }
+
     /// Switch to a different thread.
     pub fn switch_thread(&mut self, thread_id: Uuid) -> bool {
         if self.threads.contains_key(&thread_id) {

@@ -292,6 +292,7 @@ impl TestHarnessBuilder {
             skills_config: SkillsConfig::default(),
             hooks,
             cost_guard,
+            persona_registry: None,
         };
 
         TestHarness {

@@ -390,6 +390,7 @@ impl Agent {
                 "  /heartbeat        Run heartbeat check\n",
                 "  /summarize        Summarize current thread\n",
                 "  /suggest          Suggest next steps\n",
+                "  /persona [name]   Show, switch, or list personas\n",
                 "\n",
                 "  /quit             Exit",
             ))),
@@ -485,6 +486,100 @@ impl Agent {
                 "Unknown command: {}. Try /help",
                 command
             ))),
+        }
+    }
+
+    /// Handle `/persona` command.
+    pub(super) async fn handle_persona_command(
+        &self,
+        args: &[String],
+        session: Arc<Mutex<Session>>,
+    ) -> Result<SubmissionResult, Error> {
+        let registry = match self.persona_registry() {
+            Some(r) => r,
+            None => {
+                return Ok(SubmissionResult::ok_with_message(
+                    "Personas are not enabled (no persona directories found).",
+                ));
+            }
+        };
+
+        if args.is_empty() {
+            // Show current persona
+            let sess = session.lock().await;
+            let current = sess.persona().unwrap_or("(none)");
+            return Ok(SubmissionResult::ok_with_message(format!(
+                "Active persona: {}",
+                current
+            )));
+        }
+
+        let subcmd = args[0].to_lowercase();
+
+        match subcmd.as_str() {
+            "clear" => {
+                let mut sess = session.lock().await;
+                sess.clear_persona();
+                Ok(SubmissionResult::ok_with_message(
+                    "Persona cleared. All tools restored.",
+                ))
+            }
+            "list" => {
+                let guard =
+                    registry
+                        .read()
+                        .map_err(|e| crate::personas::PersonaError::ReadError {
+                            path: "(registry)".to_string(),
+                            reason: format!("Lock poisoned: {}", e),
+                        })?;
+                let entries = guard.list();
+                if entries.is_empty() {
+                    return Ok(SubmissionResult::ok_with_message(
+                        "No personas available. Add .toml files to ~/.ironclaw/personas/ or <workspace>/personas/.",
+                    ));
+                }
+                let mut out = String::from("Available personas:\n");
+                for (name, desc) in entries {
+                    if desc.is_empty() {
+                        out.push_str(&format!("  {}\n", name));
+                    } else {
+                        out.push_str(&format!("  {} - {}\n", name, desc));
+                    }
+                }
+                Ok(SubmissionResult::ok_with_message(out))
+            }
+            name => {
+                // Switch to a persona (validate before acquiring async lock)
+                {
+                    let guard =
+                        registry
+                            .read()
+                            .map_err(|e| crate::personas::PersonaError::ReadError {
+                                path: "(registry)".to_string(),
+                                reason: format!("Lock poisoned: {}", e),
+                            })?;
+                    if guard.get(name).is_none() {
+                        let available: Vec<_> =
+                            guard.list().iter().map(|(n, _)| n.to_string()).collect();
+                        return Ok(SubmissionResult::error(format!(
+                            "Persona '{}' not found. Available: {}",
+                            name,
+                            if available.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                available.join(", ")
+                            }
+                        )));
+                    }
+                } // guard dropped before await
+
+                let mut sess = session.lock().await;
+                sess.set_persona(name);
+                Ok(SubmissionResult::ok_with_message(format!(
+                    "Persona set to: {}",
+                    name
+                )))
+            }
         }
     }
 

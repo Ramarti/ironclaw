@@ -677,6 +677,21 @@ impl Tool for ShellTool {
     ) -> Result<ToolOutput, ToolError> {
         let command = require_str(&params, "command")?;
 
+        // Persona-based command restrictions
+        if let Some(ref patterns) = ctx.persona_shell_patterns {
+            if patterns.is_empty() {
+                return Err(ToolError::NotAuthorized(
+                    "Shell access disabled by active persona".into(),
+                ));
+            }
+            if !crate::personas::matches_command_pattern(command, patterns) {
+                return Err(ToolError::NotAuthorized(format!(
+                    "Command not permitted by persona. Allowed: {}",
+                    patterns.join(", ")
+                )));
+            }
+        }
+
         let workdir = params.get("workdir").and_then(|v| v.as_str());
         let timeout = params.get("timeout").and_then(|v| v.as_u64());
 

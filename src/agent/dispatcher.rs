@@ -102,6 +102,31 @@ impl Agent {
             None
         };
 
+        // Resolve the active persona (if any) for this session
+        let active_persona = {
+            let sess = session.lock().await;
+            sess.persona().and_then(|name| {
+                self.persona_registry()
+                    .and_then(|reg| reg.read().ok())
+                    .and_then(|reg| reg.get(name).cloned())
+            })
+        };
+
+        // Overlay persona identity onto system prompt
+        let system_prompt = if let Some(ref persona) = active_persona {
+            if let Some(ref identity) = persona.identity_text {
+                let base = system_prompt.unwrap_or_default();
+                Some(format!(
+                    "## Persona: {}\n\n{}\n\n{}",
+                    persona.config.persona.name, identity, base
+                ))
+            } else {
+                system_prompt
+            }
+        } else {
+            system_prompt
+        };
+
         let mut reasoning = Reasoning::new(self.llm().clone(), self.safety().clone())
             .with_channel(message.channel.clone())
             .with_model_name(self.llm().active_model_name())
@@ -117,7 +142,12 @@ impl Agent {
         let mut context_messages = initial_messages;
 
         // Create a JobContext for tool execution (chat doesn't have a real job)
-        let job_ctx = JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        let mut job_ctx =
+            JobContext::with_user(&message.user_id, "chat", "Interactive chat session");
+        if let Some(ref persona) = active_persona {
+            job_ctx.persona_shell_patterns = Some(persona.config.shell.allowed_commands.clone());
+            job_ctx.persona_sandbox_policy = persona.config.sandbox.policy;
+        }
 
         let max_tool_iterations = self.config.max_tool_iterations;
         // Force a text-only response on the last iteration to guarantee termination
@@ -187,6 +217,22 @@ impl Agent {
                     removed = ?result.removed_tools,
                     explanation = %result.explanation,
                     "Tool attenuation applied"
+                );
+                result.tools
+            } else {
+                tool_defs
+            };
+
+            // Apply persona-based tool filtering (after skill attenuation).
+            let tool_defs = if let Some(ref persona) = active_persona {
+                let result = crate::personas::filter_tools_for_persona(&tool_defs, persona);
+                tracing::info!(
+                    persona = persona.name(),
+                    tools_available = result.tools.len(),
+                    tools_removed = result.removed_tools.len(),
+                    removed = ?result.removed_tools,
+                    explanation = %result.explanation,
+                    "Persona tool filtering applied"
                 );
                 result.tools
             } else {
@@ -871,6 +917,7 @@ mod tests {
             skills_config: SkillsConfig::default(),
             hooks: Arc::new(HookRegistry::new()),
             cost_guard: Arc::new(CostGuard::new(CostGuardConfig::default())),
+            persona_registry: None,
         };
 
         Agent::new(

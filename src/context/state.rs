@@ -146,6 +146,15 @@ pub struct JobContext {
     /// Wrapped in `Arc` for cheap cloning on every tool invocation.
     #[serde(skip)]
     pub extra_env: Arc<HashMap<String, String>>,
+
+    /// Persona shell command patterns. None = no persona restriction.
+    /// Some(empty vec) = shell disabled by persona.
+    #[serde(skip)]
+    pub persona_shell_patterns: Option<Vec<String>>,
+
+    /// Persona sandbox policy override.
+    #[serde(skip)]
+    pub persona_sandbox_policy: Option<crate::sandbox::SandboxPolicy>,
 }
 
 impl JobContext {
@@ -183,6 +192,8 @@ impl JobContext {
             transitions: Vec::new(),
             extra_env: Arc::new(HashMap::new()),
             metadata: serde_json::Value::Null,
+            persona_shell_patterns: None,
+            persona_sandbox_policy: None,
         }
     }
 

@@ -85,6 +85,14 @@ impl SubmissionParser {
                 args,
             };
         }
+        if lower.starts_with("/persona") {
+            let args: Vec<String> = trimmed
+                .split_whitespace()
+                .skip(1)
+                .map(|s| s.to_string())
+                .collect();
+            return Submission::Persona { args };
+        }
 
         if lower == "/quit" || lower == "/exit" || lower == "/shutdown" {
             return Submission::Quit;
@@ -223,6 +231,12 @@ pub enum Submission {
         /// Arguments to the command.
         args: Vec<String>,
     },
+
+    /// Persona management command (/persona [name|list|clear]).
+    Persona {
+        /// Arguments: empty = show current, name = switch, "list" or "clear".
+        args: Vec<String>,
+    },
 }
 
 impl Submission {
@@ -297,6 +311,7 @@ impl Submission {
                 | Self::Summarize
                 | Self::Suggest
                 | Self::SystemCommand { .. }
+                | Self::Persona { .. }
         )
     }
 }
@@ -691,6 +706,36 @@ mod tests {
         let submission = SubmissionParser::parse("/help");
         assert!(submission.is_control());
         assert!(!submission.starts_turn());
+    }
+
+    #[test]
+    fn test_parser_persona_no_args() {
+        let submission = SubmissionParser::parse("/persona");
+        assert!(matches!(submission, Submission::Persona { args } if args.is_empty()));
+    }
+
+    #[test]
+    fn test_parser_persona_with_name() {
+        let submission = SubmissionParser::parse("/persona designer");
+        assert!(matches!(submission, Submission::Persona { args } if args == vec!["designer"]));
+    }
+
+    #[test]
+    fn test_parser_persona_list() {
+        let submission = SubmissionParser::parse("/persona list");
+        assert!(matches!(submission, Submission::Persona { args } if args == vec!["list"]));
+    }
+
+    #[test]
+    fn test_parser_persona_clear() {
+        let submission = SubmissionParser::parse("/persona clear");
+        assert!(matches!(submission, Submission::Persona { args } if args == vec!["clear"]));
+    }
+
+    #[test]
+    fn test_parser_persona_is_control() {
+        let submission = SubmissionParser::parse("/persona designer");
+        assert!(submission.is_control());
     }
 
     #[test]

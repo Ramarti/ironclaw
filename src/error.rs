@@ -51,6 +51,9 @@ pub enum Error {
 
     #[error("Routine error: {0}")]
     Routine(#[from] RoutineError),
+
+    #[error("Persona error: {0}")]
+    Persona(#[from] crate::personas::PersonaError),
 }
 
 /// Configuration-related errors.
