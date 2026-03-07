@@ -157,6 +157,10 @@ mime_guess = "2.0.5"
 clap_complete = "4.5.0"
 lru = "0.16.3"
 
+# Discord voice channel (feature gated)
+songbird = { version = "0.5", optional = true, default-features = false, features = ["driver", "gateway", "receive", "rustls", "serenity", "tungstenite"] }
+serenity = { version = "0.12", optional = true, default-features = false, features = ["gateway", "model", "voice", "rustls_backend", "cache"] }
+
 # HTML to Markdown conversion (feature gated)
 html-to-markdown-rs = { version = "2.3", optional = true }
 readabilityrs = { version = "0.1.2", optional = true }
@@ -197,6 +201,7 @@ postgres = [
 libsql = ["dep:libsql"]
 integration = []
 html-to-markdown = ["dep:html-to-markdown-rs", "dep:readabilityrs"]
+discord-voice = ["dep:songbird", "dep:serenity"]
 
 [[test]]
 name = "html_to_markdown"

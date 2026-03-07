@@ -387,6 +387,54 @@ async fn async_main() -> anyhow::Result<()> {
         }
     }
 
+    // Add Discord voice channel if configured and not CLI-only mode.
+    #[cfg(feature = "discord-voice")]
+    if !cli.cli_only
+        && let Some(ref voice_config) = config.channels.discord_voice
+    {
+        use ironclaw::channels::discord_voice::{
+            DiscordVoiceChannel,
+            stt::OpenAiStt,
+            tts::OpenAiTts,
+        };
+
+        let bot_token = if let Some(ref secrets) = components.secrets_store {
+            secrets
+                .get_decrypted("default", "discord_bot_token")
+                .await
+                .ok()
+                .map(|s| s.expose().to_string())
+        } else {
+            None
+        }
+        .or_else(|| std::env::var("DISCORD_BOT_TOKEN").ok())
+        .ok_or_else(|| anyhow::anyhow!(
+            "discord_bot_token not found in secrets store or DISCORD_BOT_TOKEN env var"
+        ))?;
+
+        let openai_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
+            anyhow::anyhow!("OPENAI_API_KEY required for Discord voice STT/TTS")
+        })?;
+
+        let stt: Arc<dyn ironclaw::channels::discord_voice::stt::SttProvider> =
+            Arc::new(OpenAiStt::new(openai_key.clone()));
+        let tts: Arc<dyn ironclaw::channels::discord_voice::tts::TtsProvider> =
+            Arc::new(OpenAiTts::new(openai_key, voice_config.tts_voice.clone()));
+
+        let voice_channel = DiscordVoiceChannel::new(
+            voice_config.clone(),
+            stt,
+            tts,
+            bot_token,
+        );
+        channel_names.push("discord-voice".to_string());
+        channels.add(Box::new(voice_channel)).await;
+        tracing::info!(
+            mode = ?voice_config.mode,
+            "Discord voice channel enabled"
+        );
+    }
+
     // Add HTTP channel if configured and not CLI-only mode.
     let mut webhook_server_addr: Option<std::net::SocketAddr> = None;
     if !cli.cli_only

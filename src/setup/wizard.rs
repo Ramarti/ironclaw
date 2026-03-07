@@ -390,6 +390,11 @@ impl SetupWizard {
                     print_info("Let's configure a new database URL.");
                 } else {
                     print_success("Database connection successful");
+
+                    // Always run migrations (idempotent) so existing
+                    // databases pick up new tables and schema changes.
+                    self.run_migrations_postgres().await?;
+
                     self.settings.database_url = Some(url.clone());
                     return Ok(());
                 }
@@ -464,6 +469,11 @@ impl SetupWizard {
                 {
                     Ok(()) => {
                         print_success("Database connection successful");
+
+                        // Always run migrations (idempotent CREATE IF NOT EXISTS)
+                        // so existing databases pick up new tables like `settings`.
+                        self.run_migrations_libsql().await?;
+
                         self.settings.libsql_path = Some(path.clone());
                         if let Some(url) = turso_url {
                             self.settings.libsql_url = Some(url);

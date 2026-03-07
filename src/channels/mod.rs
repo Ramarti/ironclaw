@@ -28,6 +28,8 @@
 //! See the [`wasm`] module for details.
 
 mod channel;
+#[cfg(feature = "discord-voice")]
+pub mod discord_voice;
 mod http;
 mod manager;
 mod repl;

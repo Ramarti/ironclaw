@@ -15,6 +15,9 @@ pub struct ChannelsConfig {
     pub http: Option<HttpConfig>,
     pub gateway: Option<GatewayConfig>,
     pub signal: Option<SignalConfig>,
+    /// Discord voice channel configuration (feature-gated behind `discord-voice`).
+    #[cfg(feature = "discord-voice")]
+    pub discord_voice: Option<crate::channels::discord_voice::config::DiscordVoiceConfig>,
     /// Directory containing WASM channel modules (default: ~/.ironclaw/channels/).
     pub wasm_channels_dir: std::path::PathBuf,
     /// Whether WASM channels are enabled.
@@ -167,6 +170,37 @@ impl ChannelsConfig {
             None
         };
 
+        #[cfg(feature = "discord-voice")]
+        let discord_voice = {
+            use std::str::FromStr;
+            use crate::channels::discord_voice::config::{DiscordVoiceConfig, VoiceMode};
+            let enabled = parse_bool_env("DISCORD_VOICE_ENABLED", false)?;
+            if enabled {
+                let mode_str = optional_env("DISCORD_VOICE_MODE")?
+                    .unwrap_or_else(|| "listen_and_speak".to_string());
+                let mode = VoiceMode::from_str(&mode_str).map_err(|e| ConfigError::InvalidValue {
+                    key: "DISCORD_VOICE_MODE".to_string(),
+                    message: e.to_string(),
+                })?;
+                Some(DiscordVoiceConfig {
+                    mode,
+                    idle_timeout_secs: parse_optional_env("DISCORD_VOICE_IDLE_TIMEOUT_SECS", 300)?,
+                    silence_threshold_ms: parse_optional_env(
+                        "DISCORD_VOICE_SILENCE_THRESHOLD_MS",
+                        800,
+                    )?,
+                    stt_provider: optional_env("DISCORD_VOICE_STT_PROVIDER")?
+                        .unwrap_or_else(|| "openai".to_string()),
+                    tts_provider: optional_env("DISCORD_VOICE_TTS_PROVIDER")?
+                        .unwrap_or_else(|| "openai".to_string()),
+                    tts_voice: optional_env("DISCORD_VOICE_TTS_VOICE")?
+                        .unwrap_or_else(|| "alloy".to_string()),
+                })
+            } else {
+                None
+            }
+        };
+
         let cli_enabled = optional_env("CLI_ENABLED")?
             .map(|s| s.to_lowercase() != "false" && s != "0")
             .unwrap_or(true);
@@ -178,6 +212,8 @@ impl ChannelsConfig {
             http,
             gateway,
             signal,
+            #[cfg(feature = "discord-voice")]
+            discord_voice,
             wasm_channels_dir: optional_env("WASM_CHANNELS_DIR")?
                 .map(PathBuf::from)
                 .unwrap_or_else(default_channels_dir),
