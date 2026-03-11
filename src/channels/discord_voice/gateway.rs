@@ -57,6 +57,13 @@ pub enum GatewayEvent {
         user_id: UserId,
         utterance: Utterance,
     },
+    /// A text message received (DM or @mention in a channel).
+    TextMessage {
+        guild_id: Option<GuildId>,
+        channel_id: ChannelId,
+        user_id: UserId,
+        content: String,
+    },
     /// Gateway is connected and ready.
     Ready { bot_user_id: UserId },
 }
@@ -106,45 +113,70 @@ impl EventHandler for Handler {
         if msg.author.bot {
             return;
         }
-        let Some(guild_id) = msg.guild_id else {
-            return;
-        };
 
         let bot_id = self.bot_user_id.read().await;
         let Some(bot_id) = *bot_id else { return };
 
+        let is_dm = msg.guild_id.is_none();
         let mentioned = msg.mentions.iter().any(|u| u.id == bot_id);
+
+        // Strip the bot mention from the content for cleaner input.
+        let content = if mentioned {
+            msg.content
+                .replace(&format!("<@{}>", bot_id), "")
+                .replace(&format!("<@!{}>", bot_id), "")
+                .trim()
+                .to_string()
+        } else {
+            msg.content.clone()
+        };
+
+        // Handle DMs — always process.
+        if is_dm {
+            let _ = self.event_tx.send(GatewayEvent::TextMessage {
+                guild_id: None,
+                channel_id: msg.channel_id,
+                user_id: msg.author.id,
+                content,
+            });
+            return;
+        }
+
+        let guild_id = msg.guild_id.expect("checked above");
+
+        // In a guild, only respond to @mentions.
         if !mentioned {
             return;
         }
 
-        // Check if the mentioning user is in a voice channel.
+        // Emit the text message for processing.
+        if !content.is_empty() {
+            let _ = self.event_tx.send(GatewayEvent::TextMessage {
+                guild_id: Some(guild_id),
+                channel_id: msg.channel_id,
+                user_id: msg.author.id,
+                content,
+            });
+        }
+
+        // Also try to join voice if the user is in a voice channel.
         let states = self.voice_states.read().await;
         let voice_channel = states
             .get(&guild_id)
             .and_then(|gs| gs.get(&msg.author.id))
             .copied();
 
-        let Some(target_channel) = voice_channel else {
-            tracing::debug!(
-                user = %msg.author.name,
-                "User mentioned bot but is not in a voice channel"
-            );
-            return;
-        };
-
-        // Check if already in this channel.
-        {
-            let calls = self.active_calls.read().await;
-            if let Some(session) = calls.get(&guild_id)
-                && session.channel_id == target_channel
-            {
-                tracing::debug!("Already in the target voice channel");
-                return;
+        if let Some(target_channel) = voice_channel {
+            let already_in = {
+                let calls = self.active_calls.read().await;
+                calls
+                    .get(&guild_id)
+                    .is_some_and(|s| s.channel_id == target_channel)
+            };
+            if !already_in {
+                self.join_channel(&ctx, guild_id, target_channel).await;
             }
         }
-
-        self.join_channel(&ctx, guild_id, target_channel).await;
     }
 }
 
@@ -319,6 +351,7 @@ pub async fn start_gateway(
 
     let intents = GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
 
     let mut client = Client::builder(&bot_token, intents)

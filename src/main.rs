@@ -412,14 +412,18 @@ async fn async_main() -> anyhow::Result<()> {
             "discord_bot_token not found in secrets store or DISCORD_BOT_TOKEN env var"
         ))?;
 
-        let openai_key = std::env::var("OPENAI_API_KEY").map_err(|_| {
-            anyhow::anyhow!("OPENAI_API_KEY required for Discord voice STT/TTS")
-        })?;
-
-        let stt: Arc<dyn ironclaw::channels::discord_voice::stt::SttProvider> =
-            Arc::new(OpenAiStt::new(openai_key.clone()));
-        let tts: Arc<dyn ironclaw::channels::discord_voice::tts::TtsProvider> =
-            Arc::new(OpenAiTts::new(openai_key, voice_config.tts_voice.clone()));
+        let (stt, tts) = if let Ok(openai_key) = std::env::var("OPENAI_API_KEY") {
+            let s: Option<Arc<dyn ironclaw::channels::discord_voice::stt::SttProvider>> =
+                Some(Arc::new(OpenAiStt::new(openai_key.clone())));
+            let t: Option<Arc<dyn ironclaw::channels::discord_voice::tts::TtsProvider>> =
+                Some(Arc::new(OpenAiTts::new(openai_key, voice_config.tts_voice.clone())));
+            (s, t)
+        } else {
+            tracing::info!(
+                "OPENAI_API_KEY not set, Discord voice STT/TTS disabled (text-only mode)"
+            );
+            (None, None)
+        };
 
         let voice_channel = DiscordVoiceChannel::new(
             voice_config.clone(),
@@ -999,6 +1003,15 @@ async fn setup_wasm_channels(
         let secret_name = loaded.webhook_secret_name();
         let sig_key_secret_name = loaded.signature_key_secret_name();
         let hmac_secret_name = loaded.hmac_secret_name();
+        let has_caps_file = loaded.capabilities_file.is_some();
+
+        tracing::info!(
+            channel = %channel_name,
+            has_caps_file,
+            ?sig_key_secret_name,
+            ?hmac_secret_name,
+            "Channel secret config"
+        );
 
         let webhook_secret = if let Some(secrets) = secrets_store {
             secrets
@@ -1075,35 +1088,56 @@ async fn setup_wasm_channels(
             )
             .await;
 
-        // Register Ed25519 signature key if declared in capabilities
-        if let Some(ref sig_key_name) = sig_key_secret_name
-            && let Some(secrets) = secrets_store
-            && let Ok(key_secret) = secrets.get_decrypted("default", sig_key_name).await
-        {
-            match wasm_router
-                .register_signature_key(&channel_name, key_secret.expose())
-                .await
-            {
-                Ok(()) => {
-                    tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
-                }
-                Err(e) => {
-                    tracing::error!(channel = %channel_name, error = %e, "Invalid signature key in secrets store")
+        // Register Ed25519 signature key if declared in capabilities.
+        // Try secrets store first, fall back to env var.
+        if let Some(ref sig_key_name) = sig_key_secret_name {
+            let key_value = match secrets_store {
+                Some(secrets) => secrets
+                    .get_decrypted("default", sig_key_name)
+                    .await
+                    .ok()
+                    .map(|s| s.expose().to_string()),
+                None => None,
+            }
+            .or_else(|| std::env::var(sig_key_name.to_uppercase()).ok());
+
+            if let Some(ref key_val) = key_value {
+                match wasm_router
+                    .register_signature_key(&channel_name, key_val)
+                    .await
+                {
+                    Ok(()) => {
+                        tracing::info!(channel = %channel_name, "Registered Ed25519 signature key")
+                    }
+                    Err(e) => {
+                        tracing::error!(channel = %channel_name, error = %e, "Invalid signature key")
+                    }
                 }
             }
         }
 
-        // Register HMAC signing secret if declared in capabilities
-        if let Some(ref hmac_secret_name) = hmac_secret_name
-            && let Some(secrets) = secrets_store
-            && let Ok(secret) = secrets.get_decrypted("default", hmac_secret_name).await
-        {
-            wasm_router
-                .register_hmac_secret(&channel_name, secret.expose())
-                .await;
-            tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
+        // Register HMAC signing secret if declared in capabilities.
+        // Try secrets store first, fall back to env var.
+        if let Some(ref hmac_secret_name) = hmac_secret_name {
+            let hmac_value = match secrets_store {
+                Some(secrets) => secrets
+                    .get_decrypted("default", hmac_secret_name)
+                    .await
+                    .ok()
+                    .map(|s| s.expose().to_string()),
+                None => None,
+            }
+            .or_else(|| std::env::var(hmac_secret_name.to_uppercase()).ok());
+
+            if let Some(ref val) = hmac_value {
+                wasm_router
+                    .register_hmac_secret(&channel_name, val)
+                    .await;
+                tracing::info!(channel = %channel_name, "Registered HMAC signing secret");
+            }
         }
 
+        // Inject channel credentials from secrets store.
         if let Some(secrets) = secrets_store {
             match inject_channel_credentials(&channel_arc, secrets.as_ref(), &channel_name).await {
                 Ok(count) => {
@@ -1120,6 +1154,24 @@ async fn setup_wasm_channels(
                         channel = %channel_name,
                         error = %e,
                         "Failed to inject channel credentials"
+                    );
+                }
+            }
+        }
+
+        // Env var fallback for channel credentials (bot tokens, etc.)
+        // when secrets store is unavailable.
+        if let Some(ref cap_file) = loaded.capabilities_file {
+            for secret in &cap_file.setup.required_secrets {
+                let env_name = secret.name.to_uppercase();
+                if let Ok(val) = std::env::var(&env_name)
+                    && !val.is_empty()
+                {
+                    channel_arc.set_credential(&env_name, val).await;
+                    tracing::info!(
+                        channel = %channel_name,
+                        env_var = %env_name,
+                        "Injected credential from env var"
                     );
                 }
             }

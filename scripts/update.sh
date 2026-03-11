@@ -30,7 +30,7 @@ prompt() {
 }
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_FEATURES="libsql,html-to-markdown"
+BUILD_FEATURES="libsql,html-to-markdown,discord-voice"
 REMOTE_BIN="/opt/ironclaw/bin/ironclaw"
 
 # ── Collect info ─────────────────────────────────────────────────────

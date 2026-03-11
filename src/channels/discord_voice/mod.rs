@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serenity::all::{GuildId, UserId};
+use serenity::all::{ChannelId, GuildId, UserId};
 use tokio::sync::{RwLock, mpsc};
 
 use crate::channels::{
@@ -29,10 +29,13 @@ use self::stt::SttProvider;
 use self::tts::TtsProvider;
 
 /// Discord voice channel implementing the `Channel` trait.
+///
+/// Works in text-only mode when STT/TTS providers are not configured.
+/// Voice features (listen + speak) require both providers.
 pub struct DiscordVoiceChannel {
     config: DiscordVoiceConfig,
-    stt: Arc<dyn SttProvider>,
-    tts: Arc<dyn TtsProvider>,
+    stt: Option<Arc<dyn SttProvider>>,
+    tts: Option<Arc<dyn TtsProvider>>,
     cmd_tx: RwLock<Option<mpsc::UnboundedSender<GatewayCommand>>>,
     bot_user_id: RwLock<Option<UserId>>,
     http_client: reqwest::Client,
@@ -42,8 +45,8 @@ pub struct DiscordVoiceChannel {
 impl DiscordVoiceChannel {
     pub fn new(
         config: DiscordVoiceConfig,
-        stt: Arc<dyn SttProvider>,
-        tts: Arc<dyn TtsProvider>,
+        stt: Option<Arc<dyn SttProvider>>,
+        tts: Option<Arc<dyn TtsProvider>>,
         bot_token: String,
     ) -> Self {
         Self {
@@ -103,13 +106,17 @@ impl DiscordVoiceChannel {
     }
 
     /// Speak audio in a guild's voice channel via TTS.
+    /// Returns `false` if TTS is not configured.
     async fn speak_in_channel(
         &self,
         guild_id: GuildId,
         text: &str,
-    ) -> Result<(), ChannelError> {
-        let opus_data = self
-            .tts
+    ) -> Result<bool, ChannelError> {
+        let Some(ref tts) = self.tts else {
+            return Ok(false);
+        };
+
+        let opus_data = tts
             .synthesize(text)
             .await
             .map_err(|e| ChannelError::SendFailed {
@@ -128,6 +135,28 @@ impl DiscordVoiceChannel {
                 reason: "Gateway command channel closed".into(),
             })?;
         }
+        Ok(true)
+    }
+
+    /// Send a text reply to a Discord channel via the REST API.
+    async fn send_channel_message(
+        &self,
+        channel_id: ChannelId,
+        content: &str,
+    ) -> Result<(), ChannelError> {
+        self.http_client
+            .post(format!(
+                "https://discord.com/api/v10/channels/{}/messages",
+                channel_id
+            ))
+            .header("Authorization", format!("Bot {}", self.bot_token))
+            .json(&serde_json::json!({ "content": content }))
+            .send()
+            .await
+            .map_err(|e| ChannelError::SendFailed {
+                name: "discord-voice".into(),
+                reason: format!("Failed to send message: {e}"),
+            })?;
         Ok(())
     }
 }
@@ -154,7 +183,7 @@ impl Channel for DiscordVoiceChannel {
         // Store the command sender for respond().
         *self.cmd_tx.write().await = Some(cmd_tx);
 
-        let stt = Arc::clone(&self.stt);
+        let stt = self.stt.clone();
         let bot_user_id = Arc::new(RwLock::new(None::<UserId>));
         let bot_user_id_setter = Arc::clone(&bot_user_id);
 
@@ -167,13 +196,44 @@ impl Channel for DiscordVoiceChannel {
                     GatewayEvent::Ready { bot_user_id: id } => {
                         *bot_user_id_setter.write().await = Some(id);
                     }
+                    GatewayEvent::TextMessage {
+                        guild_id,
+                        channel_id,
+                        user_id,
+                        content,
+                    } => {
+                        let mut incoming = IncomingMessage::new(
+                            "discord-voice",
+                            user_id.to_string(),
+                            content,
+                        )
+                        .with_thread(channel_id.to_string())
+                        .with_metadata(serde_json::json!({
+                            "is_voice": false,
+                            "channel_id": channel_id.to_string(),
+                            "is_dm": guild_id.is_none(),
+                        }));
+
+                        if let Some(gid) = guild_id {
+                            incoming.metadata["guild_id"] =
+                                serde_json::json!(gid.to_string());
+                        }
+
+                        let _ = msg_tx.send(incoming);
+                    }
                     GatewayEvent::UtteranceReady {
                         guild_id,
                         channel_id,
                         user_id,
                         utterance,
                     } => {
-                        let stt = Arc::clone(&stt);
+                        let Some(ref stt) = stt else {
+                            tracing::debug!(
+                                "Voice utterance received but STT not configured"
+                            );
+                            continue;
+                        };
+                        let stt = Arc::clone(stt);
                         let msg_tx = msg_tx.clone();
                         tokio::spawn(async move {
                             match stt
@@ -197,7 +257,9 @@ impl Channel for DiscordVoiceChannel {
                                     let _ = msg_tx.send(incoming);
                                 }
                                 Ok(_) => {
-                                    tracing::debug!("STT returned empty text, skipping");
+                                    tracing::debug!(
+                                        "STT returned empty text, skipping"
+                                    );
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -229,13 +291,36 @@ impl Channel for DiscordVoiceChannel {
         msg: &IncomingMessage,
         response: OutgoingResponse,
     ) -> Result<(), ChannelError> {
+        let is_voice = msg
+            .metadata
+            .get("is_voice")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        // Text messages: reply in the same channel.
+        if !is_voice {
+            let channel_id_str = msg
+                .metadata
+                .get("channel_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("0");
+            let channel_id = ChannelId::new(
+                channel_id_str.parse::<u64>().unwrap_or(0),
+            );
+            return self
+                .send_channel_message(channel_id, &response.content)
+                .await;
+        }
+
+        // Voice messages: try TTS, fall back to text reply.
         let force_speak = response
             .metadata
             .get("force_speak")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        let should_speak = self.config.mode == VoiceMode::ListenAndSpeak || force_speak;
+        let should_speak =
+            self.config.mode == VoiceMode::ListenAndSpeak || force_speak;
 
         if should_speak {
             let guild_id_str = msg
@@ -246,7 +331,24 @@ impl Channel for DiscordVoiceChannel {
             let guild_id = GuildId::new(
                 guild_id_str.parse::<u64>().unwrap_or(0),
             );
-            self.speak_in_channel(guild_id, &response.content).await?;
+
+            let spoke = self
+                .speak_in_channel(guild_id, &response.content)
+                .await?;
+
+            if !spoke {
+                // TTS not configured, fall back to text in the channel.
+                let channel_id_str = msg
+                    .metadata
+                    .get("voice_channel_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("0");
+                let channel_id = ChannelId::new(
+                    channel_id_str.parse::<u64>().unwrap_or(0),
+                );
+                self.send_channel_message(channel_id, &response.content)
+                    .await?;
+            }
         } else {
             let user_id = UserId::new(
                 msg.user_id.parse::<u64>().unwrap_or(0),
@@ -285,7 +387,14 @@ impl Channel for DiscordVoiceChannel {
         if let Some(vc_id) = metadata.get("voice_channel_id").and_then(|v| v.as_str()) {
             ctx.insert("voice_channel".to_string(), vc_id.to_string());
         }
-        ctx.insert("input_type".to_string(), "voice".to_string());
+        let is_voice = metadata
+            .get("is_voice")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        ctx.insert(
+            "input_type".to_string(),
+            if is_voice { "voice" } else { "text" }.to_string(),
+        );
         ctx
     }
 
